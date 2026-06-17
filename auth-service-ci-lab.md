@@ -33,18 +33,14 @@ GitHub Actions full CI
 | EKS cluster | `pharma-dev` — you have `kubectl` access |
 | ECR repository | `<ACCOUNT_ID>.dkr.ecr.us-east-1.amazonaws.com/auth-service` |
 | IAM role | `pharma-dev-github-actions-role` (GitHub OIDC — no static keys needed) |
-| RDS PostgreSQL | `<DB_HOST>` — running in the same VPC as EKS |
-| Kubernetes Secrets | `db-credentials` and `jwt-secret` pre-created in the `dev` namespace |
+| RDS PostgreSQL | `<DB_HOST>` — single shared RDS instance used by dev, qa, and prod |
+| Kubernetes Secrets | `db-credentials` and `jwt-secret` pre-created in the `dev`, `qa`, and `prod` namespaces |
 | ArgoCD | Installed on EKS, apps `auth-service-dev`, `auth-service-qa`, and `auth-service-prod` created pointing at `https://github.com/<YOUR-USERNAME>/zen-gitops-lab1.git` |
-| Prod RDS PostgreSQL | `<PROD_DB_HOST>` — running in the same VPC as EKS |
-| QA/Prod Kubernetes Secrets | `db-credentials` and `jwt-secret` pre-created in the `qa` and `prod` namespaces |
 | GitHub Actions `production` environment | Pre-configured with required reviewers for the prod approval gate |
 
 Your instructor will give you:
 - `<ACCOUNT_ID>` — 12-digit AWS account number
-- `<DB_HOST>` — RDS endpoint for dev
-- `<QA_DB_HOST>` — RDS endpoint for qa
-- `<PROD_DB_HOST>` — RDS endpoint for prod
+- `<DB_HOST>` — RDS endpoint (same for dev, qa, and prod)
 - kubeconfig file for `kubectl` access
 - ArgoCD UI URL and login
 
@@ -849,7 +845,7 @@ Open `envs/dev/values-auth-service.yaml` and replace:
 Open `envs/qa/values-auth-service.yaml` and replace:
 
 - `<ACCOUNT_ID>` → your 12-digit AWS account ID
-- `<QA_DB_HOST>` → the RDS QA endpoint from your instructor
+- `<DB_HOST>` → the same RDS endpoint your instructor gave you for dev — all environments share the same database
 
 ### Step 3.3 — Commit and push
 
@@ -1175,7 +1171,7 @@ Expected: `{"status":"UP"}`
 In your `zen-gitops-lab1` fork, open `envs/prod/values-auth-service.yaml` and replace:
 
 - `<ACCOUNT_ID>` → your 12-digit AWS account ID
-- `<PROD_DB_HOST>` → the RDS prod endpoint from your instructor
+- `<DB_HOST>` → the same RDS endpoint used for dev and qa — all environments share the same database
 
 ```bash
 cd zen-gitops-lab1
@@ -1391,11 +1387,11 @@ CI never talks to Kubernetes. CI talks to git. Kubernetes gets its orders from g
 | ArgoCD shows `OutOfSync` but not healing | `selfHeal` not enabled | Run `argocd app set auth-service-dev --self-heal` |
 | ArgoCD app still pointing at `DPP-2026/zen-gitops-lab1` | App repoURL not updated to your fork | Notify instructor — the app needs to be re-pointed to `https://github.com/<YOUR-USERNAME>/zen-gitops-lab1.git` |
 | `argocd: command not found` | argocd CLI not installed | `brew install argocd` (Mac) or see https://argo-cd.readthedocs.io/en/stable/cli_installation/ |
-| QA pod stuck in `CrashLoopBackOff` | Spring Boot cannot connect to QA RDS | `kubectl logs -n qa deploy/auth-service` — check `DB_HOST` in `envs/qa/values-auth-service.yaml` |
+| QA pod stuck in `CrashLoopBackOff` | Wrong `DB_HOST` in QA values file | `kubectl logs -n qa deploy/auth-service` — confirm `DB_HOST` in `envs/qa/values-auth-service.yaml` matches the dev RDS endpoint (all environments share the same DB) |
 | `auth-service-qa` stays `OutOfSync` after merging QA PR | ArgoCD app repoURL still points at DPP-2026 org | Notify instructor — the QA app needs to point at your fork |
 | `Promote to Prod` workflow skips the approval gate | `production` environment not configured in your fork | Create the environment under **Settings → Environments** and add a required reviewer (Part 8.2) |
 | `Promote to Prod` workflow fails: `image not found in ECR` | The develop CI run did not complete successfully | Check the `ci-auth-service.yml` run on your develop branch; the image must exist before prod promotion |
 | `argocd app sync auth-service-prod` hangs | Prod pod cannot pull the image or connect to RDS | `kubectl describe pod -n prod` and `kubectl logs -n prod deploy/auth-service` to identify the failure |
-| Prod pod stuck in `CrashLoopBackOff` | Spring Boot cannot connect to prod RDS | Check `<PROD_DB_HOST>` in `envs/prod/values-auth-service.yaml` and confirm the RDS security group allows EKS nodes |
+| Prod pod stuck in `CrashLoopBackOff` | Wrong `DB_HOST` in prod values file | Confirm `DB_HOST` in `envs/prod/values-auth-service.yaml` matches the dev RDS endpoint — all environments share the same DB |
 | QA External Secrets show `SecretSyncError` | Dev Secrets Manager paths not reachable from ESO | Confirm `/pharma/dev/db-credentials` and `/pharma/dev/jwt-secret` exist in AWS Secrets Manager (created by Terraform in `zen-infra`) and that `pharma-dev-eso-role` has `GetSecretValue` on those paths |
 | Prod External Secrets show `SecretSyncError` | Dev Secrets Manager paths not reachable from ESO | Confirm `/pharma/dev/db-credentials` and `/pharma/dev/jwt-secret` exist in AWS Secrets Manager (created by Terraform in `zen-infra`) — prod reuses the same paths as dev and qa |
