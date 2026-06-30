@@ -33,18 +33,14 @@ GitHub Actions full CI
 | EKS cluster | `pharma-dev` — you have `kubectl` access |
 | ECR repository | `<ACCOUNT_ID>.dkr.ecr.us-east-1.amazonaws.com/auth-service` |
 | IAM role | `pharma-dev-github-actions-role` (GitHub OIDC — no static keys needed) |
-| RDS PostgreSQL | `<DB_HOST>` — running in the same VPC as EKS |
-| Kubernetes Secrets | `db-credentials` and `jwt-secret` pre-created in the `dev` namespace |
+| RDS PostgreSQL | `<DB_HOST>` — single shared RDS instance used by dev, qa, and prod |
+| Kubernetes Secrets | `db-credentials` and `jwt-secret` pre-created in the `dev`, `qa`, and `prod` namespaces |
 | ArgoCD | Installed on EKS, apps `auth-service-dev`, `auth-service-qa`, and `auth-service-prod` created pointing at `https://github.com/<YOUR-USERNAME>/zen-gitops-lab1.git` |
-| Prod RDS PostgreSQL | `<PROD_DB_HOST>` — running in the same VPC as EKS |
-| QA/Prod Kubernetes Secrets | `db-credentials` and `jwt-secret` pre-created in the `qa` and `prod` namespaces |
 | GitHub Actions `production` environment | Pre-configured with required reviewers for the prod approval gate |
 
 Your instructor will give you:
 - `<ACCOUNT_ID>` — 12-digit AWS account number
-- `<DB_HOST>` — RDS endpoint for dev
-- `<QA_DB_HOST>` — RDS endpoint for qa
-- `<PROD_DB_HOST>` — RDS endpoint for prod
+- `<DB_HOST>` — RDS endpoint (same for dev, qa, and prod)
 - kubeconfig file for `kubectl` access
 - ArgoCD UI URL and login
 
@@ -231,6 +227,45 @@ spec:
   destination:
     server: https://kubernetes.default.svc
     namespace: dev
+  syncPolicy:
+    automated:
+      prune: true
+      allowEmpty: false
+    syncOptions:
+      - CreateNamespace=true
+      - PrunePropagationPolicy=foreground
+      - PruneLast=true
+    retry:
+      limit: 5
+      backoff:
+        duration: 5s
+        factor: 2
+        maxDuration: 3m
+EOF
+```
+
+Create QA ARgo application
+```bash
+kubectl apply -f - <<'EOF'
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: auth-service-qa
+  namespace: argocd
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: pharma
+  source:
+    repoURL: https://github.com/DPP-2026/zen-gitops-lab1.git
+    targetRevision: HEAD
+    path: helm-charts
+    helm:
+      valueFiles:
+        - ../envs/qa/values-auth-service.yaml
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: qa
   syncPolicy:
     automated:
       prune: true
@@ -531,7 +566,7 @@ ArgoCD will attempt an initial sync immediately. Because the QA values file alre
 
 > Same principle as QA: secrets must exist before the ArgoCD application is created. For prod, the ArgoCD app uses manual sync, so there is no risk of an immediate uncontrolled deploy — but the namespace and secrets still need to be ready before the student runs `argocd app sync` in Part 10.
 
-Prod has its own RDS instance provisioned by Terraform in `zen-infra`. Its Secrets Manager paths (`/pharma/prod/db-credentials`, `/pharma/prod/jwt-secret`) are separate from dev/qa.
+Prod shares the same RDS instance and credentials as dev and qa. The ExternalSecrets reference the same `/pharma/dev/...` paths in Secrets Manager, provisioned by Terraform in `zen-infra`.
 
 ```bash
 export AWS_REGION=us-east-1
@@ -556,19 +591,19 @@ spec:
   data:
     - secretKey: DB_USERNAME
       remoteRef:
-        key: /pharma/prod/db-credentials
+        key: /pharma/dev/db-credentials
         property: username
     - secretKey: DB_PASSWORD
       remoteRef:
-        key: /pharma/prod/db-credentials
+        key: /pharma/dev/db-credentials
         property: password
     - secretKey: SPRING_DATASOURCE_USERNAME
       remoteRef:
-        key: /pharma/prod/db-credentials
+        key: /pharma/dev/db-credentials
         property: username
     - secretKey: SPRING_DATASOURCE_PASSWORD
       remoteRef:
-        key: /pharma/prod/db-credentials
+        key: /pharma/dev/db-credentials
         property: password
 EOF
 
@@ -589,7 +624,7 @@ spec:
   data:
     - secretKey: JWT_SECRET
       remoteRef:
-        key: /pharma/prod/jwt-secret
+        key: /pharma/dev/jwt-secret
         property: secret
 EOF
 
@@ -810,7 +845,7 @@ Open `envs/dev/values-auth-service.yaml` and replace:
 Open `envs/qa/values-auth-service.yaml` and replace:
 
 - `<ACCOUNT_ID>` → your 12-digit AWS account ID
-- `<QA_DB_HOST>` → the RDS QA endpoint from your instructor
+- `<DB_HOST>` → the same RDS endpoint your instructor gave you for dev — all environments share the same database
 
 ### Step 3.3 — Commit and push
 
@@ -1136,7 +1171,7 @@ Expected: `{"status":"UP"}`
 In your `zen-gitops-lab1` fork, open `envs/prod/values-auth-service.yaml` and replace:
 
 - `<ACCOUNT_ID>` → your 12-digit AWS account ID
-- `<PROD_DB_HOST>` → the RDS prod endpoint from your instructor
+- `<DB_HOST>` → the same RDS endpoint used for dev and qa — all environments share the same database
 
 ```bash
 cd zen-gitops-lab1
@@ -1352,11 +1387,11 @@ CI never talks to Kubernetes. CI talks to git. Kubernetes gets its orders from g
 | ArgoCD shows `OutOfSync` but not healing | `selfHeal` not enabled | Run `argocd app set auth-service-dev --self-heal` |
 | ArgoCD app still pointing at `DPP-2026/zen-gitops-lab1` | App repoURL not updated to your fork | Notify instructor — the app needs to be re-pointed to `https://github.com/<YOUR-USERNAME>/zen-gitops-lab1.git` |
 | `argocd: command not found` | argocd CLI not installed | `brew install argocd` (Mac) or see https://argo-cd.readthedocs.io/en/stable/cli_installation/ |
-| QA pod stuck in `CrashLoopBackOff` | Spring Boot cannot connect to QA RDS | `kubectl logs -n qa deploy/auth-service` — check `DB_HOST` in `envs/qa/values-auth-service.yaml` |
+| QA pod stuck in `CrashLoopBackOff` | Wrong `DB_HOST` in QA values file | `kubectl logs -n qa deploy/auth-service` — confirm `DB_HOST` in `envs/qa/values-auth-service.yaml` matches the dev RDS endpoint (all environments share the same DB) |
 | `auth-service-qa` stays `OutOfSync` after merging QA PR | ArgoCD app repoURL still points at DPP-2026 org | Notify instructor — the QA app needs to point at your fork |
 | `Promote to Prod` workflow skips the approval gate | `production` environment not configured in your fork | Create the environment under **Settings → Environments** and add a required reviewer (Part 8.2) |
 | `Promote to Prod` workflow fails: `image not found in ECR` | The develop CI run did not complete successfully | Check the `ci-auth-service.yml` run on your develop branch; the image must exist before prod promotion |
 | `argocd app sync auth-service-prod` hangs | Prod pod cannot pull the image or connect to RDS | `kubectl describe pod -n prod` and `kubectl logs -n prod deploy/auth-service` to identify the failure |
-| Prod pod stuck in `CrashLoopBackOff` | Spring Boot cannot connect to prod RDS | Check `<PROD_DB_HOST>` in `envs/prod/values-auth-service.yaml` and confirm the RDS security group allows EKS nodes |
+| Prod pod stuck in `CrashLoopBackOff` | Wrong `DB_HOST` in prod values file | Confirm `DB_HOST` in `envs/prod/values-auth-service.yaml` matches the dev RDS endpoint — all environments share the same DB |
 | QA External Secrets show `SecretSyncError` | Dev Secrets Manager paths not reachable from ESO | Confirm `/pharma/dev/db-credentials` and `/pharma/dev/jwt-secret` exist in AWS Secrets Manager (created by Terraform in `zen-infra`) and that `pharma-dev-eso-role` has `GetSecretValue` on those paths |
-| Prod External Secrets show `SecretSyncError` | Prod Secrets Manager paths not created | Confirm `/pharma/prod/db-credentials` and `/pharma/prod/jwt-secret` exist in AWS Secrets Manager (created by Terraform in `zen-infra`) |
+| Prod External Secrets show `SecretSyncError` | Dev Secrets Manager paths not reachable from ESO | Confirm `/pharma/dev/db-credentials` and `/pharma/dev/jwt-secret` exist in AWS Secrets Manager (created by Terraform in `zen-infra`) — prod reuses the same paths as dev and qa |
